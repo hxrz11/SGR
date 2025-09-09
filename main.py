@@ -16,8 +16,8 @@ from pydantic import BaseModel, Field, ValidationError
 
 from database import DatabaseManager
 from ollama_client import OllamaClient
-from sgr_schema import DATABASE_SCHEMA, EXAMPLE_QUERIES, SQLGeneration
-from agent_tools import run_sql, call_status_api
+from sgr_schema import DATABASE_SCHEMA, EXAMPLE_QUERIES, SQLGeneration, QueryAnalysis
+from agent_tools import run_sql, call_status_api, clarification
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -29,6 +29,9 @@ ollama_client = OllamaClient(os.getenv("OLLAMA_BASE_URL", "http://localhost:1143
 BASE_DIR = Path(__file__).resolve().parent
 LOGS_DIR = BASE_DIR / "logs"
 LOGS_DIR.mkdir(exist_ok=True)
+
+# Хранилище пользовательских ограничений по сессиям
+SESSION_CONSTRAINTS: Dict[str, Dict[str, Any]] = {}
 
 
 @asynccontextmanager
@@ -52,6 +55,12 @@ DEFAULT_MODEL = "qwen3:32b"
 
 class QueryRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=500)
+    session_id: str | None = Field(
+        default="default", description="Идентификатор сессии пользователя"
+    )
+    constraints: Dict[str, Any] | None = Field(
+        default=None, description="Ограничения, выбранные пользователем"
+    )
 
 
 class QueryResponse(BaseModel):
@@ -63,8 +72,41 @@ class QueryResponse(BaseModel):
     model_used: str
     final_answer: str = ""
     steps: List[str] = Field(default_factory=list)
+    clarification_needed: bool = False
+    clarification_questions: List[str] = Field(default_factory=list)
 
     model_config = {"protected_namespaces": ()}
+
+
+def find_missing_parameters(analysis: QueryAnalysis) -> List[str]:
+    """Определить, какие параметры отсутствуют в анализе запроса."""
+
+    def _is_missing(value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, str) and value.strip().lower() in {
+            "",
+            "не указано",
+            "не указан",
+            "нет",
+        }:
+            return True
+        if isinstance(value, list) and len(value) == 0:
+            return True
+        return False
+
+    questions: List[str] = []
+    if _is_missing(analysis.key_entities):
+        questions.append(
+            "Уточните, пожалуйста, ключевые сущности (номер заявки, номенклатура, пользователь, объект)."
+        )
+    if _is_missing(analysis.search_terms):
+        questions.append("Какие поисковые термины следует использовать?")
+    if _is_missing(analysis.date_references):
+        questions.append("За какой период нужны данные?")
+    if _is_missing(analysis.quantity_filters):
+        questions.append("Есть ли ограничения по количеству?")
+    return questions
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -93,6 +135,11 @@ async def get_history():
 async def process_query(request: QueryRequest):
     """Обработка естественного запроса"""
     start_time = time.time()
+
+    session_id = request.session_id or "default"
+    session_constraints = SESSION_CONSTRAINTS.setdefault(session_id, {})
+    if request.constraints:
+        session_constraints.update(request.constraints)
 
     # Общий шаблон промпта для SGR
     base_prompt = f"""
@@ -130,6 +177,12 @@ async def process_query(request: QueryRequest):
 - Даты указывай в формате YYYY-MM-DD.
 """
 
+    if session_constraints:
+        base_prompt += (
+            "\nДополнительные ограничения из предыдущих запросов: "
+            f"{json.dumps(session_constraints, ensure_ascii=False)}\n"
+        )
+
     # Получение схемы для структурированного вывода
     schema = SQLGeneration.model_json_schema()
 
@@ -159,6 +212,24 @@ async def process_query(request: QueryRequest):
             except ValidationError as e:
                 logger.error(f"Ошибка валидации: {e}")
                 raise HTTPException(status_code=422, detail=e.errors())
+
+            missing = find_missing_parameters(sgr_result.analysis)
+            if missing:
+                steps.append("Требуются уточнения")
+                clarif = clarification(missing)
+                execution_time = int((time.time() - start_time) * 1000)
+                return QueryResponse(
+                    sql_query="",
+                    explanation="Недостаточно данных для построения запроса",
+                    confidence=0.0,
+                    results=[],
+                    execution_time_ms=execution_time,
+                    model_used=DEFAULT_MODEL,
+                    final_answer="",
+                    steps=steps,
+                    clarification_needed=True,
+                    clarification_questions=clarif["questions"],
+                )
 
             last_sql = sgr_result.sql_query
             steps.append("SQL запрос сгенерирован")
