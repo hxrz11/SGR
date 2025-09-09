@@ -47,7 +47,13 @@ class DatabaseManager:
         """
 
         # Предварительная нормализация запроса
-        sql = self._normalize_query(sql)
+        sql, applied_conditions = self._normalize_query(sql)
+
+        if applied_conditions:
+            logger.info(
+                "Automatically applied conditions: %s",
+                "; ".join(applied_conditions),
+            )
 
         # Базовая валидация SQL
         sql_lower = sql.lower().strip()
@@ -65,8 +71,6 @@ class DatabaseManager:
         if '"purchaseallview"' not in sql_lower:
             sql = re.sub(r'(?i)purchaseallview', '"PurchaseAllView"', sql)
         
-        # Не добавляем LIMIT автоматически, выполняем запрос как есть
-
         logger.info("Executing SQL: %s", sql)
 
         try:
@@ -86,8 +90,13 @@ class DatabaseManager:
         if self.pool:
             await self.pool.close()
 
-    def _normalize_query(self, sql: str) -> str:
-        """Исправляет распространённые ошибки в сгенерированных запросах"""
+    def _normalize_query(self, sql: str) -> Tuple[str, List[str]]:
+        """Исправляет распространённые ошибки в сгенерированных запросах.
+
+        Возвращает нормализованный SQL и список автоматически добавленных условий.
+        """
+
+        applied_conditions: List[str] = []
 
         def normalize_term(term: str) -> str:
             """Убирает окончания у русских слов для более широкого поиска"""
@@ -109,4 +118,19 @@ class DatabaseManager:
         pattern = r'"(' + '|'.join(numeric_fields) + r')"\s*([<>]=?)\s*(\d+(?:\.\d+)?)'
         sql = re.sub(pattern, replace_numeric, sql, flags=re.IGNORECASE)
 
-        return sql
+        sql_lower = sql.lower()
+
+        # Добавляем фильтр по статусу записи, если он не указан
+        if 'purchaserecordstatus' not in sql_lower:
+            if 'where' in sql_lower:
+                sql += ' AND "PurchaseRecordStatus"=\'A\''
+            else:
+                sql += ' WHERE "PurchaseRecordStatus"=\'A\''
+            applied_conditions.append('"PurchaseRecordStatus"=\'A\'')
+
+        # Добавляем LIMIT 100, если он отсутствует
+        if not re.search(r'\blimit\s+\d+', sql_lower):
+            sql = sql.rstrip().rstrip(';') + ' LIMIT 100'
+            applied_conditions.append('LIMIT 100')
+
+        return sql, applied_conditions
