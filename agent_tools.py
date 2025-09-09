@@ -29,6 +29,25 @@ async def run_sql(sql: str) -> Tuple[List[Dict[str, Any]], str]:
     # Remove trailing semicolon for consistent manipulation
     query = sql.strip().rstrip(";")
 
+    # Determine which date fields are selected for formatting
+    date_fields = [
+        "OrderDate",
+        "ApprovalDate",
+        "ProcessingDate",
+        "CompletedDate",
+        "PurchaseCardDate",
+    ]
+    selected_dates: List[str] = []
+    select_match = re.search(r"select\s+(.*?)\s+from", query, re.IGNORECASE | re.DOTALL)
+    if select_match:
+        select_clause = select_match.group(1)
+        if "*" in select_clause:
+            selected_dates = date_fields.copy()
+        else:
+            for field in date_fields:
+                if re.search(rf'"{field}"', select_clause, re.IGNORECASE):
+                    selected_dates.append(field)
+
     # Ensure the PurchaseRecordStatus filter is applied
     if re.search(r"where", query, re.IGNORECASE):
         if not re.search(r"purchaserecordstatus", query, re.IGNORECASE):
@@ -61,14 +80,32 @@ async def run_sql(sql: str) -> Tuple[List[Dict[str, Any]], str]:
         count=1,
     )
 
-    # Wrap query to select only the first row per GlobalUid and reapply LIMIT
-    query = f"SELECT * FROM ({query}) sub WHERE rn = 1 {limit_clause}"
+    # Wrap query, apply formatting to selected date fields and reapply LIMIT
+    if selected_dates:
+        fmt_columns = ", ".join(
+            [
+                f"to_char(sub.\"{field}\", 'DD-MM-YYYY') AS \"{field}Fmt\""
+                for field in selected_dates
+            ]
+        )
+        query = (
+            f"SELECT sub.*, {fmt_columns} FROM ({query}) sub WHERE rn = 1 {limit_clause}"
+        )
+    else:
+        query = f"SELECT * FROM ({query}) sub WHERE rn = 1 {limit_clause}"
 
     # Initialize connection pool on first use
     if _db_manager.pool is None:
         await _db_manager.initialize()
 
-    return await _db_manager.execute_query(query)
+    results, executed_sql = await _db_manager.execute_query(query)
+
+    # Remove original date fields, keeping only formatted ones
+    for row in results:
+        for field in selected_dates:
+            row.pop(field, None)
+
+    return results, executed_sql
 
 async def call_status_api(purchase_card_id: str) -> Dict[str, Any]:
     """Fetch status timeline for a purchase from an external API."""
