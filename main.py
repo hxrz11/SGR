@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import time
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +17,7 @@ from pydantic import BaseModel, Field, ValidationError
 from database import DatabaseManager
 from ollama_client import OllamaClient
 from sgr_schema import DATABASE_SCHEMA, EXAMPLE_QUERIES, SQLGeneration
+from agent_tools import run_sql, call_status_api
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -162,7 +164,7 @@ async def process_query(request: QueryRequest):
             steps.append("SQL запрос сгенерирован")
 
             try:
-                query_results, executed_sql = await db_manager.execute_query(
+                query_results, executed_sql = await run_sql(
                     sgr_result.sql_query
                 )
             except ValueError as e:
@@ -177,12 +179,67 @@ async def process_query(request: QueryRequest):
                 execution_time,
             )
             steps.append("SQL запрос выполнен")
+
+            purchase_ids = [row.get("PurchaseCardId") for row in query_results if row.get("PurchaseCardId")]
+            if purchase_ids:
+                status_map: Dict[str, Dict[str, Any]] = {}
+                for i in range(0, len(purchase_ids), 20):
+                    batch = purchase_ids[i : i + 20]
+                    responses = await asyncio.gather(
+                        *[call_status_api(pid) for pid in batch],
+                        return_exceptions=True,
+                    )
+                    for pid, resp in zip(batch, responses):
+                        if isinstance(resp, Exception):
+                            logger.warning("Status API failed for %s: %s", pid, resp)
+                            continue
+                        timeline = (
+                            resp.get("status_timeline")
+                            or resp.get("timeline")
+                            or resp.get("history")
+                            or resp.get("statuses")
+                            or []
+                        )
+                        current_status = None
+                        last_date = None
+                        if isinstance(timeline, list) and timeline:
+                            latest = max(
+                                timeline,
+                                key=lambda x: x.get("date")
+                                or x.get("timestamp")
+                                or "",
+                            )
+                            current_status = latest.get("status") or latest.get("Status")
+                            last_date = latest.get("date") or latest.get("timestamp")
+                        else:
+                            current_status = resp.get("current_status") or resp.get("status")
+                            last_date = (
+                                resp.get("last_status_date")
+                                or resp.get("date")
+                                or resp.get("timestamp")
+                            )
+                        status_map[pid] = {
+                            "current_status": current_status,
+                            "last_status_date": last_date,
+                        }
+                for row in query_results:
+                    pid = row.get("PurchaseCardId")
+                    if pid in status_map:
+                        row.update(status_map[pid])
+                steps.append("Статусы закупок получены")
+            else:
+                steps.append("PurchaseCardId не найден; статусы не получены")
+
             final_prompt = (
                 f'Вопрос пользователя: "{request.question}"\n'
                 f"Ответ базы данных в формате JSON:\n{json.dumps(query_results, ensure_ascii=False)}\n\n"
                 "Сформулируй лаконичный, грамотный и вежливый ответ на русском языке, используя только эти данные. "
                 "Если данных недостаточно, сообщи, что по запросу ничего не найдено."
             )
+            if not purchase_ids:
+                final_prompt += (
+                    "\nПоле PurchaseCardId отсутствует, поэтому статусы закупок не получены."
+                )
             final_answer = await ollama_client.generate_text(
                 model=DEFAULT_MODEL,
                 prompt=final_prompt,
