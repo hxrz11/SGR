@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Text2SQL POC с SGR</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🤖 Text2SQL с Schema-Guided Reasoning</h1>
+            <p>Преобразование естественного языка в SQL для системы закупок</p>
+        </header>
+
+        <div class="query-section">
+            <div class="input-group">
+                <label for="question">Ваш вопрос на русском языке:</label>
+                <textarea id="question" placeholder="Например: Найди все закупки по заявке ЛГ000000524"></textarea>
+            </div>
+
+            <button id="submit-btn" onclick="submitQuery()">🔍 Найти</button>
+        </div>
+
+        <div id="loading" class="loading" style="display: none;">
+            <div class="spinner"></div>
+            <p>Генерирую SQL запрос...</p>
+        </div>
+
+        <div id="steps" class="steps" style="display: none;">
+            <h3>Ход выполнения</h3>
+            <ul id="steps-list"></ul>
+        </div>
+
+        <div id="results" class="results" style="display: none;">
+            <div class="tabs">
+                <button class="tab-btn active" data-tab="explanation" onclick="showTab('explanation', event)">📝 Объяснение</button>
+                <button class="tab-btn" data-tab="sql" onclick="showTab('sql', event)">💾 SQL</button>
+                <button class="tab-btn" data-tab="data" onclick="showTab('data', event)">📊 Данные</button>
+            </div>
+
+            <div id="explanation-tab" class="tab-content">
+                <div id="thought-card" class="answer-card" style="display: none;">
+                    <h3>Размышление</h3>
+                    <p id="thought-text"></p>
+                </div>
+                <div id="final-answer-card" class="answer-card">
+                    <h3>Ответ пользователю</h3>
+                    <p id="final-answer-text"></p>
+                </div>
+                <div class="explanation-card">
+                    <h3>Объяснение логики запроса</h3>
+                    <p id="explanation-text"></p>
+                    <div class="confidence">
+                        <span>Уверенность модели: </span>
+                        <div class="confidence-bar">
+                            <div id="confidence-fill"></div>
+                        </div>
+                        <span id="confidence-text"></span>
+                    </div>
+                </div>
+            </div>
+
+            <div id="sql-tab" class="tab-content" style="display: none;">
+                <div class="sql-card">
+                    <h3>Сгенерированный SQL запрос</h3>
+                    <pre id="sql-query"></pre>
+                    <button onclick="copySql()">📋 Копировать</button>
+                    <div class="raw-section">
+                        <h4>RAW ответ</h4>
+                        <pre id="raw-response"></pre>
+                    </div>
+                </div>
+            </div>
+
+            <div id="data-tab" class="tab-content" style="display: none;">
+                <div class="data-card">
+                    <h3>Результаты выполнения</h3>
+                    <div id="data-stats"></div>
+                    <div class="normalized-section">
+                        <h4>Нормализованный ответ</h4>
+                        <div id="data-table"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="history">
+            <h3>🕑 Последние запросы</h3>
+            <div id="history-list" class="history-list"></div>
+        </div>
+    </div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>

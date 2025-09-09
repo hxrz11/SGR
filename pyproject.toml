@@ -1,0 +1,13 @@
+[project]
+name = "sgr-patch"
+version = "0.1.0"
+description = "SGR contracts, prompts, SQL AST validator (no LIMIT)"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.7",
+    "sqlglot>=25.14.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+addopts = "-q"
