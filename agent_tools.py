@@ -14,6 +14,8 @@ async def run_sql(sql: str) -> Tuple[List[Dict[str, Any]], str]:
 
     - Only allows SELECT statements targeting "PurchaseAllView".
     - Ensures the filter "PurchaseRecordStatus"='A'.
+    - Returns only the most relevant row per "GlobalUid" using a
+      ``ROW_NUMBER()`` window function.
     - Ensures a LIMIT 100 is applied when none provided.
 
     Returns the query results and the final executed SQL.
@@ -40,9 +42,27 @@ async def run_sql(sql: str) -> Tuple[List[Dict[str, Any]], str]:
     else:
         query += ' WHERE "PurchaseRecordStatus"=\'A\''
 
-    # Ensure LIMIT 100 is present
-    if not re.search(r"limit\s+\d+", query, re.IGNORECASE):
-        query += " LIMIT 100"
+    # Extract or add LIMIT clause for later use
+    limit_match = re.search(r"limit\s+\d+", query, re.IGNORECASE)
+    limit_clause = limit_match.group(0) if limit_match else "LIMIT 100"
+    query = re.sub(r"limit\s+\d+", "", query, flags=re.IGNORECASE).strip()
+
+    # Insert ROW_NUMBER window function
+    row_number_clause = (
+        'ROW_NUMBER() OVER (PARTITION BY "GlobalUid" ORDER BY '
+        'CASE WHEN "PurchaseCardId" IS NOT NULL THEN 0 ELSE 1 END, '
+        '"ProcessingDate" DESC, "CompletedDate" DESC, "ApprovalDate" DESC) AS rn'
+    )
+    query = re.sub(
+        r"from",
+        f", {row_number_clause} FROM",
+        query,
+        flags=re.IGNORECASE,
+        count=1,
+    )
+
+    # Wrap query to select only the first row per GlobalUid and reapply LIMIT
+    query = f"SELECT * FROM ({query}) sub WHERE rn = 1 {limit_clause}"
 
     # Initialize connection pool on first use
     if _db_manager.pool is None:
